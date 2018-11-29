@@ -13,6 +13,8 @@ import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.List;
 import java.util.Scanner;
+import java.util.Timer;
+import java.util.TimerTask;
 
 import org.apache.commons.cli.CommandLine;
 import org.apache.commons.cli.DefaultParser;
@@ -21,12 +23,14 @@ import org.apache.commons.cli.Options;
 import org.apache.commons.cli.ParseException;
 import org.eclipse.californium.core.coap.Request;
 import org.eclipse.californium.core.coap.Response;
+import org.eclipse.californium.core.network.CoapEndpoint;
+import org.eclipse.californium.core.network.Endpoint;
 import org.eclipse.californium.core.network.config.NetworkConfig;
+import org.eclipse.californium.elements.Connector;
+import org.eclipse.californium.scandium.DTLSConnector;
 import org.eclipse.leshan.LwM2m;
-import org.eclipse.leshan.LwM2mId;
 import org.eclipse.leshan.client.californium.LeshanClient;
 import org.eclipse.leshan.client.californium.LeshanClientBuilder;
-import org.eclipse.leshan.client.object.Device;
 import org.eclipse.leshan.client.object.Server;
 import org.eclipse.leshan.client.observer.LwM2mClientObserverAdapter;
 import org.eclipse.leshan.client.resource.LwM2mObjectEnabler;
@@ -41,6 +45,7 @@ import org.eclipse.leshan.server.demo.coap.LwM2mCoAPClient;
 import org.eclipse.leshan.server.demo.coap.ResponseCallback;
 import org.eclipse.leshan.server.demo.codec.JsonToCbor;
 import org.eclipse.leshan.server.demo.model.MyDevice;
+import org.eclipse.leshan.server.demo.model.Object10250;
 import org.eclipse.leshan.server.demo.scriptedpush.ScriptEntry;
 import org.eclipse.leshan.server.demo.scriptedpush.ScriptedPushParser;
 import org.eclipse.leshan.server.demo.scriptedpush.ScriptedPusher;
@@ -175,14 +180,14 @@ public class LwM2mDeviceDemo {
 		}
 
 		// get lifetime
-		long lifetime = 500;
+		long lifetime = 300; // default lifetime to 300.
 		if (cl.hasOption("l")) {
 			try {
 				lifetime = Long.parseLong(cl.getOptionValue("l"));
 				if (lifetime < 1) {
 					System.err.println("Invalid value for -l option, lifetime should be an postive not null integer: ");
 					return;
-				}else if (lifetime <= 247) {
+				} else if (lifetime <= 247) {
 					LOG.info("WARNING a lifetime should be largely higher than COAP_MAX_EXCHANGE_LIFETIME (~247s)");
 				}
 			} catch (NumberFormatException e) {
@@ -227,7 +232,8 @@ public class LwM2mDeviceDemo {
 
 		// Initialize model
 		List<ObjectModel> models = ObjectLoader.loadDefault();
-		// models.addAll(ObjectLoader.loadDdfResources("/models", modelPaths));
+		List<ObjectModel> jsonModels = ObjectLoader.loadJsonStream(ClassLoader.getSystemResourceAsStream("models/10250.json"));
+		models.addAll(jsonModels);
 
 		// Initialize object list
 		ObjectsInitializer initializer = new ObjectsInitializer(new LwM2mModel(models));
@@ -246,7 +252,15 @@ public class LwM2mDeviceDemo {
 			}
 		}
 		initializer.setClassForObject(DEVICE, MyDevice.class);
-		List<LwM2mObjectEnabler> enablers = initializer.create(SECURITY, SERVER, DEVICE);
+		// we add the object 10250 for our test
+		final Object10250 object10250 = new Object10250();
+		for(ObjectModel model : jsonModels) {
+			if (model.id == 10250) {
+				object10250.setObjectModel(model);				
+			}
+		}
+		initializer.setInstancesForObject(10250, object10250);
+		List<LwM2mObjectEnabler> enablers = initializer.create(SECURITY, SERVER, DEVICE, 10250);
 
 		// Create CoAP Config
 		NetworkConfig coapConfig;
@@ -256,6 +270,8 @@ public class LwM2mDeviceDemo {
 			coapConfig.load(configFile);
 		} else {
 			coapConfig = LeshanClientBuilder.createDefaultNetworkConfig();
+			// we want CON for all notifications
+			coapConfig.set(NetworkConfig.Keys.NOTIFICATION_CHECK_INTERVAL_COUNT, 1);
 			coapConfig.store(configFile);
 		}
 
@@ -273,7 +289,8 @@ public class LwM2mDeviceDemo {
 			else
 				builder.disableUnsecuredEndpoint();
 		}
-		final LwM2mCoAPClient client = new LwM2mCoAPClient(builder.build());
+		final LeshanClient leshanClient = builder.build();
+		final LwM2mCoAPClient client = new LwM2mCoAPClient(leshanClient);
 
 		// Start the client
 		client.start();
@@ -305,10 +322,28 @@ public class LwM2mDeviceDemo {
 				if (scriptedPushPayload != null)
 					pusher.stop();
 
-				// send de-registration request before destroy
-				client.destroy(true); 
+				// we don't send de-registration request before destroy To be able to test re-register.
+				client.destroy(false);
 			}
 		});
+
+		// each 2 seconds force session resumption and send notification for object 10250. 
+		Timer timer = new Timer("Device-Current Time");
+		timer.schedule(new TimerTask() {
+			@Override
+			public void run() {
+				// we want a large payload only for observe response, notifications are small.
+				object10250.setLargePayload(false);
+				for (Endpoint endpoint : leshanClient.getCoapServer().getEndpoints()) {
+					Connector connector = ((CoapEndpoint) endpoint).getConnector();
+					if (connector instanceof DTLSConnector) {
+						LOG.info("Force session resumption...");
+						((DTLSConnector) connector).forceResumeAllSessions();
+					}
+				}
+				object10250.fireResourcesChange(4);
+			}
+		}, 4000, 2000);
 
 		// activate scanner only if -pv option is used
 		if (onDemandPushPayload != null) {
