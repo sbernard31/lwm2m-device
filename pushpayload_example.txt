@@ -1,0 +1,6 @@
+1000
+{"Asset":{"Sensors":{"Light":{"Level":300},"Pressure":{"Temperature":0}}}}
+1500
+{"Asset":{"Sensors":{"Light":{"Level":400},"Pressure":{"Temperature":10}}}}
+2000
+{"Asset":{"Sensors":{"Light":{"Level":200},"Pressure":{"Temperature":15}}}}
